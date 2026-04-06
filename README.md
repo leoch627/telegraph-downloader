@@ -99,13 +99,40 @@ export WEB_PROXY_URL="http://127.0.0.1:7890"
 - `--db-path`: 增量状态数据库（默认 `state/processed.sqlite3`）。
 - `--session-name`: Telethon 会话文件名（默认 `telegraph_downloader`）。
 - `--timeout`: 网页和图片下载超时秒数（默认 20）。
+- `--workers`: 图片并行下载线程数（默认 6）。
 - `--log-level`: 日志级别（`DEBUG/INFO/WARNING/ERROR`）。
+
+## 日志和并行下载示例
+
+```bash
+python telegraph_downloader.py \
+  --api-id 123456 \
+  --api-hash "your_api_hash" \
+  --channel "your_channel_username" \
+  --limit 300 \
+  --workers 10 \
+  --log-level INFO
+```
+
+运行时会输出：
+
+- 抓到的每个 Telegraph 链接。
+- 每个链接解析出的图片 URL。
+- 每张图片的下载开始/成功/失败日志。
+- ZIP 打包进度日志。
 
 ## 输出说明
 
 - ZIP 文件保存到 `downloads/`（可通过参数修改）。
 - 文件名格式：`文章标题_帖子ID_评论ID.zip`。
 - 已处理链接记录在 SQLite 里，重复运行会自动跳过已处理链接。
+
+## 中断续跑（已支持）
+
+- 下载过程中如果中断（例如断网、手动停止、机器重启），下次运行会自动续跑。
+- 脚本会把每个链接的图片先保存到 `downloads/.partial/<link_hash>/`。
+- 重跑时会跳过已下载完成的图片，只补缺失图片；全部下载成功后再打包 ZIP。
+- ZIP 生成成功后，会自动清理对应 `.partial` 临时目录。
 
 ## 注意事项
 
