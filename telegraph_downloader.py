@@ -8,6 +8,7 @@ import re
 import shutil
 import sqlite3
 import zipfile
+from datetime import date, datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -38,11 +39,22 @@ class AppConfig:
     download_workers: int
     tg_proxy_url: Optional[str]
     web_proxy_url: Optional[str]
+    target_date: Optional[date]
+    direct_link: Optional[str]
+
+
+@dataclass
+class TelegraphLink:
+    url: str
+    label: Optional[str] = None
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Download images from telegra.ph links found in Telegram channel comments and pack into ZIP files."
+        description=(
+            "Download images from telegra.ph links found in Telegram channel comments, "
+            "or download a single Telegraph link directly."
+        )
     )
     parser.add_argument("--api-id", default="", help="Telegram API ID, or env TELEGRAM_API_ID")
     parser.add_argument("--api-hash", default="", help="Telegram API hash, or env TELEGRAM_API_HASH")
@@ -53,6 +65,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=50, help="How many recent channel posts to scan")
     parser.add_argument("--timeout", type=int, default=20, help="HTTP timeout for telegra.ph/image downloads")
     parser.add_argument("--workers", type=int, default=6, help="Parallel worker count for image downloads")
+    parser.add_argument(
+        "--date",
+        default="",
+        help="Only process links from comments on this UTC date (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--link",
+        default="",
+        help="Download this Telegraph link directly (skip Telegram scanning)",
+    )
     parser.add_argument(
         "--tg-proxy",
         default="",
@@ -86,17 +108,38 @@ def parse_args() -> argparse.Namespace:
         or getenv("HTTP_PROXY", "")
     )
 
-    if not args.api_id:
-        parser.error("Missing API ID. Set --api-id or TELEGRAM_API_ID.")
-    if not args.api_hash:
-        parser.error("Missing API hash. Set --api-hash or TELEGRAM_API_HASH.")
-    if not args.channel:
-        parser.error("Missing channel. Set --channel or TELEGRAM_CHANNEL.")
+    args.link = normalize_telegraph_url(args.link) if args.link else ""
+    if args.link and not is_supported_telegraph_url(args.link):
+        parser.error("--link must be a valid telegra.ph or graph.org URL")
 
-    try:
-        args.api_id = int(args.api_id)
-    except ValueError as exc:
-        raise SystemExit("API ID must be an integer.") from exc
+    if args.date:
+        try:
+            args.date = parse_target_date(args.date)
+        except ValueError as exc:
+            parser.error(str(exc))
+    else:
+        args.date = None
+
+    if args.link:
+        if args.api_id:
+            try:
+                args.api_id = int(args.api_id)
+            except ValueError as exc:
+                raise SystemExit("API ID must be an integer.") from exc
+        else:
+            args.api_id = 0
+    else:
+        if not args.api_id:
+            parser.error("Missing API ID. Set --api-id or TELEGRAM_API_ID.")
+        if not args.api_hash:
+            parser.error("Missing API hash. Set --api-hash or TELEGRAM_API_HASH.")
+        if not args.channel:
+            parser.error("Missing channel. Set --channel or TELEGRAM_CHANNEL.")
+
+        try:
+            args.api_id = int(args.api_id)
+        except ValueError as exc:
+            raise SystemExit("API ID must be an integer.") from exc
 
     if args.limit <= 0:
         parser.error("--limit must be > 0")
@@ -106,6 +149,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--workers must be > 0")
 
     return args
+
+
+def parse_target_date(raw: str) -> date:
+    value = raw.strip()
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError("--date must be in YYYY-MM-DD format") from exc
 
 
 def getenv(name: str, default: str = "") -> str:
@@ -201,10 +252,13 @@ def mark_processed(
 
 
 def sanitize_filename(name: str, max_len: int = 80) -> str:
-    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    compact = re.sub(r"\s+", " ", name).strip()
+    # Keep readable Unicode text while removing filesystem-reserved characters.
+    sanitized = re.sub(r"[<>:\"/\\|?*\x00-\x1F]", " ", compact)
+    sanitized = re.sub(r"\s+", " ", sanitized).strip(" .")
     if not sanitized:
         return "telegraph"
-    return sanitized[:max_len]
+    return sanitized[:max_len].rstrip(" .") or "telegraph"
 
 
 def normalize_telegraph_url(url: str) -> str:
@@ -239,25 +293,43 @@ def extract_telegraph_links(text: str) -> list[str]:
     return result
 
 
-def extract_telegraph_links_from_message(message) -> list[str]:
+def extract_telegraph_links_from_message(message) -> list[TelegraphLink]:
     text = message.message or ""
     seen = set()
-    result = []
+    result: list[TelegraphLink] = []
 
-    def add_candidate(candidate: str) -> None:
+    def normalize_label(label: Optional[str]) -> Optional[str]:
+        if not label:
+            return None
+        cleaned = re.sub(r"\s+", " ", label).strip()
+        return cleaned or None
+
+    def add_candidate(candidate: str, label: Optional[str] = None) -> None:
         normalized = normalize_telegraph_url(candidate)
         if not is_supported_telegraph_url(normalized):
             return
+        normalized_label = normalize_label(label)
         if normalized not in seen:
             seen.add(normalized)
-            result.append(normalized)
+            result.append(TelegraphLink(url=normalized, label=normalized_label))
+            return
+
+        # Backfill label if the URL was found earlier via plain-text regex.
+        if normalized_label:
+            for item in result:
+                if item.url == normalized and not item.label:
+                    item.label = normalized_label
+                    break
 
     for link in extract_telegraph_links(text):
         add_candidate(link)
 
     for entity in message.entities or []:
         if isinstance(entity, MessageEntityTextUrl) and entity.url:
-            add_candidate(entity.url)
+            start = entity.offset
+            end = start + entity.length
+            entity_label = text[start:end] if 0 <= start < end <= len(text) else None
+            add_candidate(entity.url, entity_label)
         elif isinstance(entity, MessageEntityUrl):
             start = entity.offset
             end = start + entity.length
@@ -269,7 +341,7 @@ def extract_telegraph_links_from_message(message) -> list[str]:
         for button in getattr(row, "buttons", []) or []:
             button_url = getattr(button, "url", None)
             if button_url:
-                add_candidate(button_url)
+                add_candidate(button_url, getattr(button, "text", None))
 
     return result
 
@@ -436,6 +508,9 @@ def download_images_to_zip(
 
 
 async def run(config: AppConfig) -> None:
+    if config.api_id <= 0:
+        raise ValueError("API ID must be provided for Telegram scanning mode")
+
     tg_proxy = build_telethon_proxy(config.tg_proxy_url)
     client = TelegramClient(config.session_name, config.api_id, config.api_hash, proxy=tg_proxy)
     await client.start()
@@ -464,6 +539,8 @@ async def run(config: AppConfig) -> None:
             config.output_dir,
             config.db_path,
         )
+        if config.target_date:
+            logging.info("Date filter enabled (UTC): %s", config.target_date.isoformat())
         if config.tg_proxy_url:
             logging.info("Using Telegram proxy: %s", config.tg_proxy_url)
         if config.web_proxy_url:
@@ -482,6 +559,12 @@ async def run(config: AppConfig) -> None:
 
             async for comment in client.iter_messages(config.channel, reply_to=post.id):
                 stats["comments_scanned"] += 1
+
+                if config.target_date:
+                    comment_date = comment.date.astimezone(timezone.utc).date()
+                    if comment_date != config.target_date:
+                        continue
+
                 text = comment.message or ""
                 if not text and not comment.entities:
                     continue
@@ -497,7 +580,8 @@ async def run(config: AppConfig) -> None:
                     post.id,
                 )
 
-                for link in links:
+                for link_item in links:
+                    link = link_item.url
                     stats["links_found"] += 1
                     logging.info("Captured link: %s", link)
 
@@ -525,7 +609,11 @@ async def run(config: AppConfig) -> None:
                         mark_processed(conn, link, post.id, comment.id, "")
                         continue
 
-                    zip_name = f"{sanitize_filename(article_title)}_{post.id}_{comment.id}.zip"
+                    filename_title = link_item.label or article_title
+                    if link_item.label:
+                        logging.info("Using hyperlink label as filename title: %s", link_item.label)
+
+                    zip_name = f"{sanitize_filename(filename_title)}_{post.id}_{comment.id}.zip"
                     zip_path = config.output_dir / zip_name
                     image_count, image_total = download_images_to_zip(
                         session=http_session,
@@ -556,6 +644,65 @@ async def run(config: AppConfig) -> None:
         await client.disconnect()
 
 
+def run_direct_link_mode(config: AppConfig) -> None:
+    if not config.direct_link:
+        raise ValueError("Direct link mode requires a Telegraph link")
+
+    conn = ensure_db(config.db_path)
+    http_session = create_http_session(config.web_proxy_url)
+    link = config.direct_link
+
+    try:
+        logging.info("Direct link mode: %s", link)
+        if config.web_proxy_url:
+            logging.info("Using web proxy for requests: %s", config.web_proxy_url)
+
+        if is_processed(conn, link):
+            logging.info("Skip already processed link: %s", link)
+            return
+
+        try:
+            article_title, image_urls = fetch_telegraph_images(
+                session=http_session,
+                telegraph_url=link,
+                timeout=config.request_timeout,
+            )
+            logging.info("Parsed %d image(s) from link: %s", len(image_urls), link)
+        except requests.RequestException as exc:
+            logging.warning("Telegraph parse failed: %s (%s)", link, exc)
+            return
+
+        if not image_urls:
+            logging.info("No images found in %s", link)
+            mark_processed(conn, link, 0, 0, "")
+            return
+
+        link_key = hashlib.sha1(link.encode("utf-8")).hexdigest()[:8]
+        zip_name = f"{sanitize_filename(article_title)}_{link_key}.zip"
+        zip_path = config.output_dir / zip_name
+        image_count, image_total = download_images_to_zip(
+            session=http_session,
+            image_urls=image_urls,
+            zip_path=zip_path,
+            link=link,
+            timeout=config.request_timeout,
+            workers=config.download_workers,
+        )
+
+        if image_count == image_total and image_total > 0:
+            mark_processed(conn, link, 0, 0, str(zip_path))
+            logging.info("Saved %s (%d images)", zip_path, image_count)
+        else:
+            logging.warning(
+                "Link not fully completed yet (%d/%d): %s. It will resume on next run.",
+                image_count,
+                image_total,
+                link,
+            )
+    finally:
+        conn.close()
+
+
 def main() -> None:
     args = parse_args()
     logging.basicConfig(
@@ -575,10 +722,15 @@ def main() -> None:
         download_workers=args.workers,
         tg_proxy_url=args.tg_proxy or None,
         web_proxy_url=args.web_proxy or None,
+        target_date=args.date,
+        direct_link=args.link or None,
     )
 
     try:
-        asyncio.run(run(config))
+        if config.direct_link:
+            run_direct_link_mode(config)
+        else:
+            asyncio.run(run(config))
     except KeyboardInterrupt:
         logging.warning("Interrupted by user.")
 
