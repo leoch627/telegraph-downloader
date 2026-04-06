@@ -14,10 +14,12 @@ import requests
 import socks
 from bs4 import BeautifulSoup
 from telethon import TelegramClient
+from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
 
-TELEGRAPH_PATTERN = re.compile(r"https?://telegra\.ph/\S+")
+TELEGRAPH_PATTERN = re.compile(r"https?://(?:telegra\.ph|graph\.org)/\S+", re.IGNORECASE)
 TRAILING_PUNCTUATION = ".,;:!?)]}\"'"
 VALID_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+ALLOWED_TELEGRAPH_HOSTS = {"telegra.ph", "graph.org", "www.telegra.ph", "www.graph.org"}
 
 
 @dataclass
@@ -199,17 +201,69 @@ def sanitize_filename(name: str, max_len: int = 80) -> str:
 
 
 def normalize_telegraph_url(url: str) -> str:
-    return url.rstrip(TRAILING_PUNCTUATION)
+    trimmed = url.rstrip(TRAILING_PUNCTUATION)
+    parsed = urlparse(trimmed)
+    if not parsed.scheme or not parsed.netloc:
+        return trimmed
+
+    # Normalize hostname case so de-dup is stable.
+    normalized_netloc = parsed.netloc.lower()
+    return parsed._replace(netloc=normalized_netloc).geturl()
+
+
+def is_supported_telegraph_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme in {"http", "https"} and host in ALLOWED_TELEGRAPH_HOSTS
 
 
 def extract_telegraph_links(text: str) -> list[str]:
     seen = set()
     result = []
+
     for match in TELEGRAPH_PATTERN.findall(text):
         normalized = normalize_telegraph_url(match)
+        if not is_supported_telegraph_url(normalized):
+            continue
         if normalized not in seen:
             seen.add(normalized)
             result.append(normalized)
+
+    return result
+
+
+def extract_telegraph_links_from_message(message) -> list[str]:
+    text = message.message or ""
+    seen = set()
+    result = []
+
+    def add_candidate(candidate: str) -> None:
+        normalized = normalize_telegraph_url(candidate)
+        if not is_supported_telegraph_url(normalized):
+            return
+        if normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+
+    for link in extract_telegraph_links(text):
+        add_candidate(link)
+
+    for entity in message.entities or []:
+        if isinstance(entity, MessageEntityTextUrl) and entity.url:
+            add_candidate(entity.url)
+        elif isinstance(entity, MessageEntityUrl):
+            start = entity.offset
+            end = start + entity.length
+            if 0 <= start < end <= len(text):
+                add_candidate(text[start:end])
+
+    # Some forwarded/comments use inline URL buttons instead of visible URLs in text.
+    for row in getattr(getattr(message, "reply_markup", None), "rows", []) or []:
+        for button in getattr(row, "buttons", []) or []:
+            button_url = getattr(button, "url", None)
+            if button_url:
+                add_candidate(button_url)
+
     return result
 
 
@@ -316,10 +370,10 @@ async def run(config: AppConfig) -> None:
             async for comment in client.iter_messages(config.channel, reply_to=post.id):
                 stats["comments_scanned"] += 1
                 text = comment.message or ""
-                if not text:
+                if not text and not comment.entities:
                     continue
 
-                links = extract_telegraph_links(text)
+                links = extract_telegraph_links_from_message(comment)
                 if not links:
                     continue
 
