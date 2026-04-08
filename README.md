@@ -127,6 +127,160 @@ python telegraph_downloader.py \
 - 文件名格式：`文章标题_帖子ID_评论ID.zip`。
 - 已处理链接记录在 SQLite 里，重复运行会自动跳过已处理链接。
 
+## 持久化运行（Linux 推荐）
+
+推荐用 `systemd --user` + `timer`，支持开机后自动定时执行、崩溃后可重启、日志可集中查看。
+
+### 1) 先手动跑通一次
+
+首次运行 Telethon 需要输入验证码，先在终端手动执行一次，确认会话文件已生成。
+
+### 2) 创建环境变量文件
+
+创建 `~/.config/telegraph-downloader.env`：
+
+```bash
+TELEGRAM_API_ID=123456
+TELEGRAM_API_HASH=your_hash
+TELEGRAM_CHANNEL=your_channel
+```
+
+### 3) 创建用户服务
+
+创建 `~/.config/systemd/user/telegraph-downloader.service`：
+
+```ini
+[Unit]
+Description=Telegraph Downloader Job
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/yourname/dev/telegraph-downloader
+EnvironmentFile=%h/.config/telegraph-downloader.env
+ExecStart=/home/yourname/dev/telegraph-downloader/.venv/bin/python /home/yourname/dev/telegraph-downloader/telegraph_downloader.py --limit 300 --workers 6
+```
+
+### 4) 创建定时器
+
+创建 `~/.config/systemd/user/telegraph-downloader.timer`：
+
+```ini
+[Unit]
+Description=Run Telegraph Downloader every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+### 5) 启动 / 查看 / 停止
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now telegraph-downloader.timer
+systemctl --user list-timers telegraph-downloader.timer
+journalctl --user -u telegraph-downloader.service -f
+```
+
+停止并移除：
+
+```bash
+systemctl --user disable --now telegraph-downloader.timer
+```
+
+如果是服务器无人值守场景，建议额外执行：
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+### 6) 常见持久化场景
+
+- 按日期跑一次：在 `ExecStart` 后追加 `--date 2026-04-07`，任务完成后退出。
+- 单链接抓取：在 `ExecStart` 后追加 `--link https://telegra.ph/pp-09-03-27`，抓完即退出。
+- 长期巡检：不加 `--date` / `--link`，由 timer 周期执行。
+
+## 持久化运行（macOS）
+
+推荐用 `launchd`，支持开机自启、后台定时执行、自动写日志。
+
+### 1) 先手动跑通一次
+
+首次运行 Telethon 需要输入验证码，先在终端手动执行一次，确认会话文件已生成。
+
+### 2) 创建 LaunchAgent
+
+在 `~/Library/LaunchAgents/com.telegraph.downloader.plist` 写入（把路径和参数改成你自己的）：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.telegraph.downloader</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>cd /Users/yourname/dev/telegraph-downloader &amp;&amp; source .venv/bin/activate &amp;&amp; TELEGRAM_API_ID=123456 TELEGRAM_API_HASH=your_hash TELEGRAM_CHANNEL=your_channel python telegraph_downloader.py --limit 300 --workers 6</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/yourname/dev/telegraph-downloader</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StartInterval</key>
+  <integer>600</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/yourname/dev/telegraph-downloader/logs/launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/yourname/dev/telegraph-downloader/logs/launchd.err.log</string>
+</dict>
+</plist>
+```
+
+`StartInterval=600` 表示每 10 分钟跑一次。脚本有 SQLite 增量状态，不会重复下载已处理链接。
+
+### 3) 启动 / 查看 / 停止
+
+```bash
+mkdir -p ~/Library/LaunchAgents /Users/yourname/dev/telegraph-downloader/logs
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.telegraph.downloader.plist
+launchctl enable gui/$(id -u)/com.telegraph.downloader
+launchctl kickstart -k gui/$(id -u)/com.telegraph.downloader
+```
+
+查看状态：
+
+```bash
+launchctl print gui/$(id -u)/com.telegraph.downloader
+tail -f /Users/yourname/dev/telegraph-downloader/logs/launchd.out.log /Users/yourname/dev/telegraph-downloader/logs/launchd.err.log
+```
+
+停止并移除：
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.telegraph.downloader.plist
+```
+
+### 4) 常见持久化场景
+
+- 按日期跑一次：直接加 `--date 2026-04-07`，任务完成后会退出（适合一次性补档）。
+- 单链接抓取：直接加 `--link https://telegra.ph/pp-09-03-27`，抓完即退出。
+- 长期巡检：不加 `--date` / `--link`，配合 `StartInterval` 周期执行。
+
 ## 中断续跑（已支持）
 
 - 下载过程中如果中断（例如断网、手动停止、机器重启），下次运行会自动续跑。
