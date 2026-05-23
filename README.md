@@ -1,3 +1,95 @@
+# Telegraph Downloader
+
+从 Telegram 评论或直接的 telegra.ph 链接抓取页面内图片并打包为 ZIP 的小工具。
+
+## 要求
+
+- Python 3.8+
+- 依赖见 `requirements.txt`（建议在 virtualenv 中安装）
+
+安装依赖：
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+## 配置
+
+推荐使用 `.env` 或环境变量配置：仓库包含一个示例文件 [`.env.example`](.env.example).
+
+支持的环境变量（或对应的 CLI 参数）：
+
+- `TELEGRAM_API_ID` — Telegram API ID（仅在扫描频道时需要）
+- `TELEGRAM_API_HASH` — Telegram API hash（仅在扫描频道时需要）
+- `TELEGRAM_CHANNEL` — 要扫描的频道名或 invite handle
+- `TG_PROXY_URL` — 可选，Telegram 连接代理（例如 `socks5://127.0.0.1:1080`）
+- `WEB_PROXY_URL` — 可选，用于 HTTP 请求的代理
+
+示例 `.env`（不要把真实密钥提交到仓库）：
+
+```ini
+TELEGRAM_API_ID=
+TELEGRAM_API_HASH=
+TELEGRAM_CHANNEL=
+# 可选代理
+TG_PROXY_URL=
+WEB_PROXY_URL=
+```
+
+仓库已将 `.env` 列入 `.gitignore`，请不要将包含密钥的 `.env` 推上远程。
+
+## 用法
+
+在本仓库根目录运行：
+
+- 直接下载单个 Telegraph 页面（跳过 Telegram）：
+
+```bash
+python telegraph_downloader.py --link "https://telegra.ph/Example-Title-01-01" \
+  --output-dir downloads --timeout 20 --workers 6
+```
+
+- 扫描频道评论并下载链接（需要 API ID/Hash 与 channel）：
+
+```bash
+python telegraph_downloader.py --api-id 12345 --api-hash abcd1234 \
+  --channel my_channel --limit 50 --timeout 20 --workers 6
+```
+
+可选参数包括 `--tg-proxy` 与 `--web-proxy`，分别用于 Telegram 连接与网页抓取。
+
+## 特性与实现细节
+
+- 支持解析消息中的显式 URL、实体内联链接与按钮 URL。
+- 对非 telegra.ph 链接会尝试跟随重定向（HEAD/GET），以捕获短链（例如 t.me 按钮）最终跳转到 telegra.ph/graph.org 的情况。
+- 下载时支持断点续传：临时文件保存在输出目录的 `.partial/<link_key>/`，下载完成后打包为 ZIP 并清理临时目录。
+- 已使用 SQLite 记录处理过的链接（默认 `state/processed.sqlite3`），避免重复下载。
+
+## 调试与测试
+
+- 若要手动测试某个短链是否被解析为 telegra.ph，可以使用 `--link` 模式配合该短链：
+
+```bash
+python telegraph_downloader.py --link "https://t.me/some_short_link" 
+```
+
+（脚本会尝试跟随重定向并在最终目标为 telegra.ph 时下载图片）
+
+## 推送到仓库
+
+创建、提交并推送 README：
+
+```bash
+git add README.md
+git commit -m "Add README"
+git push
+```
+
+---
+
+如果你希望我把当前 shell 环境里存在的变量写入一个本地 `.env` 文件（注意这会把真实值写入磁盘），回复“创建实际 .env”；或者我可以只在仓库中创建一个空 ` .env` 模板。也可以让我把 README 做成英文版或补充更多运行示例。
 
 # Telegraph Comment Image Downloader
 
