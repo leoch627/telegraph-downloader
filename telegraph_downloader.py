@@ -278,6 +278,30 @@ def is_supported_telegraph_url(url: str) -> bool:
     return parsed.scheme in {"http", "https"} and host in ALLOWED_TELEGRAPH_HOSTS
 
 
+def resolve_redirect_to_telegraph(session: requests.Session, url: str, timeout: int) -> Optional[str]:
+    """Follow redirects for `url` and return a telegra.ph/graph.org URL if the final
+    destination is a supported Telegraph host. Returns None otherwise.
+    """
+    try:
+        # Try a HEAD first to avoid downloading the whole body. Some servers reject HEAD.
+        resp = session.head(url, allow_redirects=True, timeout=timeout)
+        final = resp.url
+    except requests.RequestException:
+        try:
+            # Fall back to GET if HEAD fails.
+            resp = session.get(url, allow_redirects=True, timeout=timeout, stream=True)
+            final = resp.url
+            # Close response to avoid holding the connection open.
+            resp.close()
+        except requests.RequestException:
+            return None
+
+    final_normalized = normalize_telegraph_url(final)
+    if is_supported_telegraph_url(final_normalized):
+        return final_normalized
+    return None
+
+
 def extract_telegraph_links(text: str) -> list[str]:
     seen = set()
     result = []
@@ -293,7 +317,9 @@ def extract_telegraph_links(text: str) -> list[str]:
     return result
 
 
-def extract_telegraph_links_from_message(message) -> list[TelegraphLink]:
+def extract_telegraph_links_from_message(
+    message, session: Optional[requests.Session] = None, timeout: int = 10
+) -> list[TelegraphLink]:
     text = message.message or ""
     seen = set()
     result: list[TelegraphLink] = []
@@ -307,7 +333,16 @@ def extract_telegraph_links_from_message(message) -> list[TelegraphLink]:
     def add_candidate(candidate: str, label: Optional[str] = None) -> None:
         normalized = normalize_telegraph_url(candidate)
         if not is_supported_telegraph_url(normalized):
-            return
+            # If the candidate is not itself a telegra.ph URL, try following redirects
+            # (useful for t.me short links or other redirectors that point to telegra.ph).
+            if session:
+                resolved = resolve_redirect_to_telegraph(session, candidate, timeout)
+                if resolved:
+                    normalized = resolved
+                else:
+                    return
+            else:
+                return
         normalized_label = normalize_label(label)
         if normalized not in seen:
             seen.add(normalized)
@@ -569,7 +604,9 @@ async def run(config: AppConfig) -> None:
                 if not text and not comment.entities:
                     continue
 
-                links = extract_telegraph_links_from_message(comment)
+                links = extract_telegraph_links_from_message(
+                    comment, session=http_session, timeout=config.request_timeout
+                )
                 if not links:
                     continue
 
