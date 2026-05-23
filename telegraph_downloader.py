@@ -30,7 +30,7 @@ ALLOWED_TELEGRAPH_HOSTS = {"telegra.ph", "graph.org", "www.telegra.ph", "www.gra
 class AppConfig:
     api_id: int
     api_hash: str
-    channel: str
+    channels: list[str]
     session_name: str
     output_dir: Path
     db_path: Path
@@ -58,7 +58,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--api-id", default="", help="Telegram API ID, or env TELEGRAM_API_ID")
     parser.add_argument("--api-hash", default="", help="Telegram API hash, or env TELEGRAM_API_HASH")
-    parser.add_argument("--channel", default="", help="Channel username or invite handle, or env TELEGRAM_CHANNEL")
+    parser.add_argument(
+        "--channel",
+        action="append",
+        default=[],
+        help=(
+            "Channel username or invite handle. Repeat this flag for multiple channels, "
+            "or set TELEGRAM_CHANNEL to a comma-separated list."
+        ),
+    )
     parser.add_argument("--session-name", default="telegraph_downloader", help="Telethon session name")
     parser.add_argument("--output-dir", default="downloads", help="Directory for generated ZIP files")
     parser.add_argument("--db-path", default="state/processed.sqlite3", help="SQLite path for incremental state")
@@ -99,7 +107,13 @@ def parse_args() -> argparse.Namespace:
 
     args.api_id = args.api_id or ("" if not (v := getenv("TELEGRAM_API_ID")) else v)
     args.api_hash = args.api_hash or getenv("TELEGRAM_API_HASH", "")
-    args.channel = args.channel or getenv("TELEGRAM_CHANNEL", "")
+
+    raw_channels = list(args.channel)
+    env_channels = getenv("TELEGRAM_CHANNEL", "")
+    if env_channels:
+        raw_channels.append(env_channels)
+    args.channels = parse_channel_list(raw_channels)
+
     args.tg_proxy = args.tg_proxy or getenv("TG_PROXY_URL", "")
     args.web_proxy = (
         args.web_proxy
@@ -133,7 +147,7 @@ def parse_args() -> argparse.Namespace:
             parser.error("Missing API ID. Set --api-id or TELEGRAM_API_ID.")
         if not args.api_hash:
             parser.error("Missing API hash. Set --api-hash or TELEGRAM_API_HASH.")
-        if not args.channel:
+        if not args.channels:
             parser.error("Missing channel. Set --channel or TELEGRAM_CHANNEL.")
 
         try:
@@ -157,6 +171,21 @@ def parse_target_date(raw: str) -> date:
         return datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError as exc:
         raise ValueError("--date must be in YYYY-MM-DD format") from exc
+
+
+def parse_channel_list(raw_values: list[str]) -> list[str]:
+    channels: list[str] = []
+    seen = set()
+
+    for raw in raw_values:
+        for item in re.split(r"[\s,]+", raw.strip()):
+            channel = item.strip()
+            if not channel or channel in seen:
+                continue
+            seen.add(channel)
+            channels.append(channel)
+
+    return channels
 
 
 def getenv(name: str, default: str = "") -> str:
@@ -565,7 +594,7 @@ async def run(config: AppConfig) -> None:
     }
 
     try:
-        logging.info("Connected to Telegram. Scanning channel: %s", config.channel)
+        logging.info("Connected to Telegram. Scanning channels: %s", ", ".join(config.channels))
         logging.info(
             "Runtime config: limit=%d timeout=%ds workers=%d output=%s db=%s",
             config.post_limit,
@@ -581,99 +610,103 @@ async def run(config: AppConfig) -> None:
         if config.web_proxy_url:
             logging.info("Using web proxy for requests: %s", config.web_proxy_url)
 
-        async for post in client.iter_messages(config.channel, limit=config.post_limit):
-            stats["posts_scanned"] += 1
-            logging.debug("Scanning post id=%s", post.id)
+        for channel in config.channels:
+            logging.info("Scanning channel: %s", channel)
 
-            has_comments = bool(post.replies and post.replies.replies and post.replies.replies > 0)
-            if not has_comments:
-                continue
+            async for post in client.iter_messages(channel, limit=config.post_limit):
+                stats["posts_scanned"] += 1
+                logging.debug("Scanning post id=%s in channel=%s", post.id, channel)
 
-            stats["posts_with_comments"] += 1
-            logging.info("Post %s has comments, scanning replies", post.id)
-
-            async for comment in client.iter_messages(config.channel, reply_to=post.id):
-                stats["comments_scanned"] += 1
-
-                if config.target_date:
-                    comment_date = comment.date.astimezone(timezone.utc).date()
-                    if comment_date != config.target_date:
-                        continue
-
-                text = comment.message or ""
-                if not text and not comment.entities:
+                has_comments = bool(post.replies and post.replies.replies and post.replies.replies > 0)
+                if not has_comments:
                     continue
 
-                links = extract_telegraph_links_from_message(
-                    comment, session=http_session, timeout=config.request_timeout
-                )
-                if not links:
-                    continue
+                stats["posts_with_comments"] += 1
+                logging.info("Post %s in %s has comments, scanning replies", post.id, channel)
 
-                logging.info(
-                    "Found %d Telegraph link(s) in comment %s (post %s)",
-                    len(links),
-                    comment.id,
-                    post.id,
-                )
+                async for comment in client.iter_messages(channel, reply_to=post.id):
+                    stats["comments_scanned"] += 1
 
-                for link_item in links:
-                    link = link_item.url
-                    stats["links_found"] += 1
-                    logging.info("Captured link: %s", link)
+                    if config.target_date:
+                        comment_date = comment.date.astimezone(timezone.utc).date()
+                        if comment_date != config.target_date:
+                            continue
 
-                    if is_processed(conn, link):
-                        stats["links_skipped"] += 1
-                        logging.info("Skip already processed link: %s", link)
+                    text = comment.message or ""
+                    if not text and not comment.entities:
                         continue
 
-                    try:
-                        logging.info("Fetching Telegraph page: %s", link)
-                        article_title, image_urls = fetch_telegraph_images(
-                            session=http_session,
-                            telegraph_url=link,
-                            timeout=config.request_timeout,
-                        )
-                        logging.info("Parsed %d image(s) from link: %s", len(image_urls), link)
-                        for idx, image_url in enumerate(image_urls, start=1):
-                            logging.info("Image URL %d/%d: %s", idx, len(image_urls), image_url)
-                    except requests.RequestException as exc:
-                        logging.warning("Telegraph parse failed: %s (%s)", link, exc)
+                    links = extract_telegraph_links_from_message(
+                        comment, session=http_session, timeout=config.request_timeout
+                    )
+                    if not links:
                         continue
 
-                    if not image_urls:
-                        logging.info("No images found in %s", link)
-                        mark_processed(conn, link, post.id, comment.id, "")
-                        continue
-
-                    filename_title = link_item.label or article_title
-                    if link_item.label:
-                        logging.info("Using hyperlink label as filename title: %s", link_item.label)
-
-                    zip_name = f"{sanitize_filename(filename_title)}_{post.id}_{comment.id}.zip"
-                    zip_path = config.output_dir / zip_name
-                    image_count, image_total = download_images_to_zip(
-                        session=http_session,
-                        image_urls=image_urls,
-                        zip_path=zip_path,
-                        link=link,
-                        timeout=config.request_timeout,
-                        workers=config.download_workers,
+                    logging.info(
+                        "Found %d Telegraph link(s) in comment %s (post %s, channel %s)",
+                        len(links),
+                        comment.id,
+                        post.id,
+                        channel,
                     )
 
-                    if image_count == image_total and image_total > 0:
-                        stats["links_downloaded"] += 1
-                        stats["images_downloaded"] += image_count
-                        mark_processed(conn, link, post.id, comment.id, str(zip_path))
-                        logging.info("Saved %s (%d images)", zip_path, image_count)
-                    else:
-                        stats["links_incomplete"] += 1
-                        logging.warning(
-                            "Link not fully completed yet (%d/%d): %s. It will resume on next run.",
-                            image_count,
-                            image_total,
-                            link,
+                    for link_item in links:
+                        link = link_item.url
+                        stats["links_found"] += 1
+                        logging.info("Captured link: %s", link)
+
+                        if is_processed(conn, link):
+                            stats["links_skipped"] += 1
+                            logging.info("Skip already processed link: %s", link)
+                            continue
+
+                        try:
+                            logging.info("Fetching Telegraph page: %s", link)
+                            article_title, image_urls = fetch_telegraph_images(
+                                session=http_session,
+                                telegraph_url=link,
+                                timeout=config.request_timeout,
+                            )
+                            logging.info("Parsed %d image(s) from link: %s", len(image_urls), link)
+                            for idx, image_url in enumerate(image_urls, start=1):
+                                logging.info("Image URL %d/%d: %s", idx, len(image_urls), image_url)
+                        except requests.RequestException as exc:
+                            logging.warning("Telegraph parse failed: %s (%s)", link, exc)
+                            continue
+
+                        if not image_urls:
+                            logging.info("No images found in %s", link)
+                            mark_processed(conn, link, post.id, comment.id, "")
+                            continue
+
+                        filename_title = link_item.label or article_title
+                        if link_item.label:
+                            logging.info("Using hyperlink label as filename title: %s", link_item.label)
+
+                        zip_name = f"{sanitize_filename(filename_title)}_{post.id}_{comment.id}.zip"
+                        zip_path = config.output_dir / zip_name
+                        image_count, image_total = download_images_to_zip(
+                            session=http_session,
+                            image_urls=image_urls,
+                            zip_path=zip_path,
+                            link=link,
+                            timeout=config.request_timeout,
+                            workers=config.download_workers,
                         )
+
+                        if image_count == image_total and image_total > 0:
+                            stats["links_downloaded"] += 1
+                            stats["images_downloaded"] += image_count
+                            mark_processed(conn, link, post.id, comment.id, str(zip_path))
+                            logging.info("Saved %s (%d images)", zip_path, image_count)
+                        else:
+                            stats["links_incomplete"] += 1
+                            logging.warning(
+                                "Link not fully completed yet (%d/%d): %s. It will resume on next run.",
+                                image_count,
+                                image_total,
+                                link,
+                            )
 
         logging.info("Done. Summary: %s", stats)
     finally:
@@ -750,7 +783,7 @@ def main() -> None:
     config = AppConfig(
         api_id=args.api_id,
         api_hash=args.api_hash,
-        channel=args.channel,
+        channels=args.channels,
         session_name=args.session_name,
         output_dir=Path(args.output_dir),
         db_path=Path(args.db_path),

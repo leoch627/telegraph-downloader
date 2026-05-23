@@ -23,7 +23,7 @@ pip install -r requirements.txt
 
 - `TELEGRAM_API_ID` — Telegram API ID（仅在扫描频道时需要）
 - `TELEGRAM_API_HASH` — Telegram API hash（仅在扫描频道时需要）
-- `TELEGRAM_CHANNEL` — 要扫描的频道名或 invite handle
+- `TELEGRAM_CHANNEL` — 要扫描的频道名或 invite handle，多个频道用逗号分隔
 - `TG_PROXY_URL` — 可选，Telegram 连接代理（例如 `socks5://127.0.0.1:1080`）
 - `WEB_PROXY_URL` — 可选，用于 HTTP 请求的代理
 
@@ -32,7 +32,7 @@ pip install -r requirements.txt
 ```ini
 TELEGRAM_API_ID=
 TELEGRAM_API_HASH=
-TELEGRAM_CHANNEL=
+TELEGRAM_CHANNEL=channel_one,channel_two
 # 可选代理
 TG_PROXY_URL=
 WEB_PROXY_URL=
@@ -51,11 +51,11 @@ python3 telegraph_downloader.py --link "https://telegra.ph/Example-Title-01-01" 
   --output-dir downloads --timeout 20 --workers 6
 ```
 
-- 扫描频道评论并下载链接（需要 API ID/Hash 与 channel）：
+- 扫描频道评论并下载链接（需要 API ID/Hash 与 channel；支持重复 `--channel` 或用逗号分隔多个频道）：
 
 ```bash
 python3 telegraph_downloader.py --api-id 12345 --api-hash abcd1234 \
-  --channel my_channel --limit 50 --timeout 20 --workers 6
+  --channel my_channel_1 --channel my_channel_2 --limit 50 --timeout 20 --workers 6
 ```
 
 可选参数包括 `--tg-proxy` 与 `--web-proxy`，分别用于 Telegram 连接与网页抓取。
@@ -136,7 +136,7 @@ python3 telegraph_downloader.py \
 ```bash
 export TELEGRAM_API_ID="123456"
 export TELEGRAM_API_HASH="your_api_hash"
-export TELEGRAM_CHANNEL="your_channel_username"
+export TELEGRAM_CHANNEL="your_channel_1,your_channel_2"
 python3 telegraph_downloader.py
 ```
 
