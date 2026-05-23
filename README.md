@@ -10,7 +10,7 @@
 安装依赖：
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
@@ -47,14 +47,14 @@ WEB_PROXY_URL=
 - 直接下载单个 Telegraph 页面（跳过 Telegram）：
 
 ```bash
-python telegraph_downloader.py --link "https://telegra.ph/Example-Title-01-01" \
+python3 telegraph_downloader.py --link "https://telegra.ph/Example-Title-01-01" \
   --output-dir downloads --timeout 20 --workers 6
 ```
 
 - 扫描频道评论并下载链接（需要 API ID/Hash 与 channel）：
 
 ```bash
-python telegraph_downloader.py --api-id 12345 --api-hash abcd1234 \
+python3 telegraph_downloader.py --api-id 12345 --api-hash abcd1234 \
   --channel my_channel --limit 50 --timeout 20 --workers 6
 ```
 
@@ -72,7 +72,7 @@ python telegraph_downloader.py --api-id 12345 --api-hash abcd1234 \
 - 若要手动测试某个短链是否被解析为 telegra.ph，可以使用 `--link` 模式配合该短链：
 
 ```bash
-python telegraph_downloader.py --link "https://t.me/some_short_link" 
+python3 telegraph_downloader.py --link "https://t.me/some_short_link" 
 ```
 
 （脚本会尝试跟随重定向并在最终目标为 telegra.ph 时下载图片）
@@ -124,7 +124,7 @@ pip install -r requirements.txt
 ### 1) 直接命令行参数
 
 ```bash
-python telegraph_downloader.py \
+python3 telegraph_downloader.py \
   --api-id 123456 \
   --api-hash "your_api_hash" \
   --channel "your_channel_username" \
@@ -137,7 +137,7 @@ python telegraph_downloader.py \
 export TELEGRAM_API_ID="123456"
 export TELEGRAM_API_HASH="your_api_hash"
 export TELEGRAM_CHANNEL="your_channel_username"
-python telegraph_downloader.py
+python3 telegraph_downloader.py
 ```
 
 ## 代理配置（你这个场景重点）
@@ -145,7 +145,7 @@ python telegraph_downloader.py
 ### Telegram 连接走代理
 
 ```bash
-python telegraph_downloader.py \
+python3 telegraph_downloader.py \
   --api-id 123456 \
   --api-hash "your_api_hash" \
   --channel "your_channel_username" \
@@ -169,7 +169,7 @@ export TG_PROXY_URL="socks5://127.0.0.1:1080"
 ### Telegraph 和图片下载走代理（可选）
 
 ```bash
-python telegraph_downloader.py \
+python3 telegraph_downloader.py \
   --api-id 123456 \
   --api-hash "your_api_hash" \
   --channel "your_channel_username" \
@@ -197,7 +197,7 @@ export WEB_PROXY_URL="http://127.0.0.1:7890"
 ## 日志和并行下载示例
 
 ```bash
-python telegraph_downloader.py \
+python3 telegraph_downloader.py \
   --api-id 123456 \
   --api-hash "your_api_hash" \
   --channel "your_channel_username" \
@@ -251,7 +251,7 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/home/yourname/dev/telegraph-downloader
 EnvironmentFile=%h/.config/telegraph-downloader.env
-ExecStart=/home/yourname/dev/telegraph-downloader/.venv/bin/python /home/yourname/dev/telegraph-downloader/telegraph_downloader.py --limit 300 --workers 6
+ExecStart=/home/yourname/dev/telegraph-downloader/.venv/bin/python3 /home/yourname/dev/telegraph-downloader/telegraph_downloader.py --limit 300 --workers 6
 ```
 
 ### 4) 创建定时器
@@ -322,7 +322,7 @@ sudo loginctl enable-linger $USER
   <array>
     <string>/bin/zsh</string>
     <string>-lc</string>
-    <string>cd /Users/yourname/dev/telegraph-downloader &amp;&amp; source .venv/bin/activate &amp;&amp; TELEGRAM_API_ID=123456 TELEGRAM_API_HASH=your_hash TELEGRAM_CHANNEL=your_channel python telegraph_downloader.py --limit 300 --workers 6</string>
+    <string>cd /Users/yourname/dev/telegraph-downloader &amp;&amp; source .venv/bin/activate &amp;&amp; TELEGRAM_API_ID=123456 TELEGRAM_API_HASH=your_hash TELEGRAM_CHANNEL=your_channel python3 telegraph_downloader.py --limit 300 --workers 6</string>
   </array>
 
   <key>WorkingDirectory</key>
